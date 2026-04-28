@@ -8,15 +8,17 @@
  * 1. Cloud mode: Uses Mem0's hosted API with MEM0_API_KEY
  * 2. Local mode: Uses in-memory storage with OPENAI_API_KEY for embeddings
  */
-// Complete console logging suppression for MCP protocol compatibility
-// This ensures no library logs interfere with the MCP communication protocol
-const noOp = () => {};
-console.log = noOp;
-console.error = noOp;
-console.warn = noOp;
-console.info = noOp;
-console.debug = noOp;
-console.trace = noOp;
+// Console suppression is required only for stdio MCP transport (logs would pollute the JSON-RPC channel).
+// HTTP transport (default for this Pereneo fork) keeps console enabled for Container App log capture.
+if (process.env.MCP_TRANSPORT === 'stdio') {
+  const noOp = () => {};
+  console.log = noOp;
+  console.error = noOp;
+  console.warn = noOp;
+  console.info = noOp;
+  console.debug = noOp;
+  console.trace = noOp;
+}
 
 // Environment variables to disable logging in various libraries
 process.env.DEBUG = '';
@@ -32,6 +34,7 @@ process.env.NO_COLOR = 'true';
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -39,6 +42,8 @@ import {
   ErrorCode,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Memory as MemoryType } from "mem0ai/oss";
+import express from "express";
+import { randomUUID } from "node:crypto";
 
 // Load Mem0 library after configuring environment to avoid unwanted telemetry
 let Memory: typeof import("mem0ai/oss").Memory;
@@ -923,10 +928,61 @@ class Mem0MCPServer {
 
   /**
    * Starts the MCP server.
+   * Default: Streamable HTTP transport on PORT (default 8080), suitable for remote use behind a reverse proxy.
+   * Set MCP_TRANSPORT=stdio for legacy stdio mode (local Claude Desktop usage).
    */
   public async start(): Promise<void> {
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
+    if (process.env.MCP_TRANSPORT === 'stdio') {
+      const transport = new StdioServerTransport();
+      await this.server.connect(transport);
+      return;
+    }
+
+    const port = parseInt(process.env.PORT || '8080', 10);
+    const app = express();
+    app.use(express.json({ limit: '4mb' }));
+
+    app.get('/health', (_req, res) => {
+      res.status(200).json({ status: 'ok', ready: this.isReady });
+    });
+
+    const transports: Record<string, StreamableHTTPServerTransport> = {};
+
+    app.post('/mcp', async (req, res) => {
+      const sessionId = req.header('mcp-session-id');
+      let transport = sessionId ? transports[sessionId] : undefined;
+
+      if (!transport) {
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (sid) => {
+            transports[sid] = transport!;
+          },
+        });
+        transport.onclose = () => {
+          const sid = transport!.sessionId;
+          if (sid) delete transports[sid];
+        };
+        await this.server.connect(transport);
+      }
+
+      await transport.handleRequest(req, res, req.body);
+    });
+
+    const handleSession = async (req: express.Request, res: express.Response) => {
+      const sessionId = req.header('mcp-session-id');
+      if (!sessionId || !transports[sessionId]) {
+        res.status(400).send('Invalid or missing session ID');
+        return;
+      }
+      await transports[sessionId].handleRequest(req, res);
+    };
+    app.get('/mcp', handleSession);
+    app.delete('/mcp', handleSession);
+
+    app.listen(port, '0.0.0.0', () => {
+      process.stderr.write(`mem0-mcp HTTP listening on :${port}\n`);
+    });
   }
 }
 

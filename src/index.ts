@@ -958,7 +958,9 @@ class Mem0MCPServer {
     const protectedResourceMetadata = {
       resource: resourceUrl,
       authorization_servers: [issuer],
-      scopes_supported: ['mcp.access'],
+      // Entra v2 requires fully-qualified scope (api://<resource>/<scope>) for cross-resource resolution.
+      // Short scope ("mcp.access") falls back to Microsoft Graph and triggers AADSTS650053.
+      scopes_supported: [`${audience}/mcp.access`],
       bearer_methods_supported: ['header'],
       resource_documentation: 'https://github.com/GroupePerenne/mem0-mcp-pereneo',
     };

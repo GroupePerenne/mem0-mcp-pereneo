@@ -44,6 +44,7 @@ import {
 import type { Memory as MemoryType } from "mem0ai/oss";
 import express from "express";
 import { randomUUID } from "node:crypto";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 
 // Load Mem0 library after configuring environment to avoid unwanted telemetry
 let Memory: typeof import("mem0ai/oss").Memory;
@@ -939,12 +940,65 @@ class Mem0MCPServer {
     }
 
     const port = parseInt(process.env.PORT || '8080', 10);
+
+    // OAuth 2.0 Resource Server configuration (MCP authorization spec 2025-11-25 / RFC 9728 / RFC 8707)
+    const tenantId = process.env.ENTRA_TENANT_ID;
+    const audience = process.env.ENTRA_AUDIENCE;
+    const resourceUrl = process.env.RESOURCE_URL;
+    if (!tenantId || !audience || !resourceUrl) {
+      process.stderr.write('FATAL: ENTRA_TENANT_ID, ENTRA_AUDIENCE, and RESOURCE_URL env vars are required in HTTP mode.\n');
+      process.exit(1);
+    }
+    const issuer = `https://login.microsoftonline.com/${tenantId}/v2.0`;
+    const jwksUri = `https://login.microsoftonline.com/${tenantId}/discovery/v2.0/keys`;
+    const JWKS = createRemoteJWKSet(new URL(jwksUri), {
+      cacheMaxAge: 3600 * 1000,
+      cooldownDuration: 30 * 1000,
+    });
+    const protectedResourceMetadata = {
+      resource: resourceUrl,
+      authorization_servers: [issuer],
+      scopes_supported: ['mcp.access'],
+      bearer_methods_supported: ['header'],
+      resource_documentation: 'https://github.com/GroupePerenne/mem0-mcp-pereneo',
+    };
+    const metadataUrl = new URL('/.well-known/oauth-protected-resource', resourceUrl).toString();
+    const wwwAuthHeader = (errorCode?: string, description?: string) => {
+      let header = `Bearer resource_metadata="${metadataUrl}"`;
+      if (errorCode) header += `, error="${errorCode}"`;
+      if (description) header += `, error_description="${description.replace(/"/g, "'")}"`;
+      return header;
+    };
+    const jwtMiddleware: express.RequestHandler = async (req, res, next) => {
+      const authHeader = req.header('authorization') || req.header('Authorization');
+      if (!authHeader || !authHeader.toLowerCase().startsWith('bearer ')) {
+        res.set('WWW-Authenticate', wwwAuthHeader());
+        res.status(401).json({ error: 'unauthorized', error_description: 'Bearer token required' });
+        return;
+      }
+      const token = authHeader.slice(7).trim();
+      try {
+        await jwtVerify(token, JWKS, { issuer, audience, algorithms: ['RS256'] });
+        next();
+      } catch (err: any) {
+        const description = err?.code || err?.message || 'invalid_token';
+        res.set('WWW-Authenticate', wwwAuthHeader('invalid_token', description));
+        res.status(401).json({ error: 'invalid_token', error_description: description });
+      }
+    };
+
     const app = express();
     app.use(express.json({ limit: '4mb' }));
 
     app.get('/health', (_req, res) => {
       res.status(200).json({ status: 'ok', ready: this.isReady });
     });
+
+    app.get('/.well-known/oauth-protected-resource', (_req, res) => {
+      res.status(200).json(protectedResourceMetadata);
+    });
+
+    app.use('/mcp', jwtMiddleware);
 
     const transports: Record<string, StreamableHTTPServerTransport> = {};
 

@@ -943,12 +943,17 @@ class Mem0MCPServer {
 
     // OAuth 2.0 Resource Server configuration (MCP authorization spec 2025-11-25 / RFC 9728 / RFC 8707)
     const tenantId = process.env.ENTRA_TENANT_ID;
-    const audience = process.env.ENTRA_AUDIENCE;
+    const audience = process.env.ENTRA_AUDIENCE;            // identifierUri (advertised in /.well-known)
+    const audienceGuid = process.env.ENTRA_AUDIENCE_GUID;   // appId GUID (Entra v2 emits this in aud claim)
     const resourceUrl = process.env.RESOURCE_URL;
     if (!tenantId || !audience || !resourceUrl) {
       process.stderr.write('FATAL: ENTRA_TENANT_ID, ENTRA_AUDIENCE, and RESOURCE_URL env vars are required in HTTP mode.\n');
       process.exit(1);
     }
+    // Per Microsoft docs (entra/identity-platform/access-token-claims-reference): v2 tokens carry
+    // aud = client ID GUID of the web API; v1 tokens carry aud = appID URI. We accept both for
+    // robustness across delegated and client_credentials flows.
+    const acceptedAudiences: string[] = [audience, audienceGuid].filter((x): x is string => !!x);
     const issuer = `https://login.microsoftonline.com/${tenantId}/v2.0`;
     const jwksUri = `https://login.microsoftonline.com/${tenantId}/discovery/v2.0/keys`;
     const JWKS = createRemoteJWKSet(new URL(jwksUri), {
@@ -980,7 +985,7 @@ class Mem0MCPServer {
       }
       const token = authHeader.slice(7).trim();
       try {
-        await jwtVerify(token, JWKS, { issuer, audience, algorithms: ['RS256'] });
+        await jwtVerify(token, JWKS, { issuer, audience: acceptedAudiences, algorithms: ['RS256'] });
         next();
       } catch (err: any) {
         const description = err?.code || err?.message || 'invalid_token';

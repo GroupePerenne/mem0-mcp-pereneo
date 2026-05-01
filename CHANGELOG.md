@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.4-pereneo.1] - 2026-05-01
+
+### 🔧 BL-47 — MCP HTTP spec §3 conformance fix
+
+Server now returns HTTP 404 (per MCP HTTP spec 2025-03-26 §3) when receiving
+requests with an unknown `Mcp-Session-Id` header (typical case: pod restart /
+cold start = in-memory `transports` map lost). Client receiving 404 must
+re-initialize without `Mcp-Session-Id` header (spec §4).
+
+Before this patch, server silently created a fresh empty transport on unknown
+session id, causing the next `tools/call` to return JSON-RPC
+`Server not initialized` with no recovery path — blocking long-running clients
+after pod recycling.
+
+Affects HTTP transport added in 0.6.4-pereneo.0 only. Stdio transport unaffected.
+
+Files changed: `src/index.ts` (POST /mcp + GET/DELETE handleSession).
+
+## [0.6.4-pereneo.0] - 2026-04-28 to 2026-04-29
+
+### 🚀 Streamable HTTP transport for Azure Container Apps
+
+Pereneo fork of `@pinkpixel/mem0-mcp` 0.6.4 adding Streamable HTTP server
+transport with OAuth 2.0 Resource Server pattern, suitable for deployment as
+Azure Container App.
+
+- **J1.0 (28/04/2026)** — Added Streamable HTTP transport (`StreamableHTTPServerTransport`)
+- **J4.0 (29/04/2026)** — Added OAuth 2.0 Resource Server (MCP authorization spec 2025-11-25)
+- **J4 fix (29/04/2026)** — Advertise fully-qualified OAuth scope in protected-resource metadata
+- **J4 fix (29/04/2026)** — Accept both URI and GUID audience in JWT validation
+- **Misc** — Added .dockerignore for minimal build context
+
 ## [0.6.1] - 2025-05-28
 
 ### 🔧 **PATCH - Supabase Configuration Fix**

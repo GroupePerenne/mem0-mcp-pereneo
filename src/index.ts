@@ -1013,6 +1013,28 @@ class Mem0MCPServer {
       const sessionId = req.header('mcp-session-id');
       let transport = sessionId ? transports[sessionId] : undefined;
 
+      // SPEC MCP HTTP 2025-03-26 §3 (Session Management) :
+      // Si le client envoie un mcp-session-id que le serveur ne reconnaît pas
+      // (cas typique : pod restart / cold start = perte de la map transports
+      // tenue en mémoire process), le serveur DOIT répondre HTTP 404. Le client
+      // DOIT alors redo initialize sans Mcp-Session-Id (spec §4).
+      // Avant ce patch, le serveur créait un nouveau transport vide et lui
+      // transmettait directement la requête, ce qui résultait en
+      // "Server not initialized" côté client (BL-47).
+      if (sessionId && !transport) {
+        res.status(404).json({
+          jsonrpc: '2.0',
+          error: {
+            code: -32001,
+            message: 'Session terminated',
+            data: { hint: 'Re-initialize without Mcp-Session-Id header' },
+          },
+          id: null,
+        });
+        return;
+      }
+
+      // Pas de mcp-session-id côté requête = nouveau handshake initialize attendu.
       if (!transport) {
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
@@ -1032,8 +1054,22 @@ class Mem0MCPServer {
 
     const handleSession = async (req: express.Request, res: express.Response) => {
       const sessionId = req.header('mcp-session-id');
-      if (!sessionId || !transports[sessionId]) {
-        res.status(400).send('Invalid or missing session ID');
+      // Header manquant = 400 Bad Request (input client invalide).
+      if (!sessionId) {
+        res.status(400).send('Missing Mcp-Session-Id header');
+        return;
+      }
+      // SPEC MCP HTTP §3 : session inconnue côté serveur → 404 (cf. POST handler).
+      if (!transports[sessionId]) {
+        res.status(404).json({
+          jsonrpc: '2.0',
+          error: {
+            code: -32001,
+            message: 'Session terminated',
+            data: { hint: 'Re-initialize without Mcp-Session-Id header' },
+          },
+          id: null,
+        });
         return;
       }
       await transports[sessionId].handleRequest(req, res);

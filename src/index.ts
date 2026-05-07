@@ -1001,6 +1001,28 @@ class Mem0MCPServer {
       res.status(200).json({ status: 'ok', ready: this.isReady });
     });
 
+    app.get('/health/deep', async (_req, res) => {
+      if (!this.isReady) {
+        res.status(503).json({ status: 'not_ready', ready: false });
+        return;
+      }
+      const client = this.cloudClient || this.supabaseClient || this.localClient;
+      if (!client) {
+        res.status(503).json({ status: 'no_client', ready: false });
+        return;
+      }
+      const timeoutMs = Number(process.env.HEALTH_DEEP_TIMEOUT_MS || 3000);
+      try {
+        await Promise.race([
+          client.search('healthcheck-ping', { user_id: '_healthcheck_charli_deep', limit: 1 }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('healthcheck_timeout')), timeoutMs))
+        ]);
+        res.status(200).json({ status: 'ok', ready: true });
+      } catch (err: any) {
+        res.status(503).json({ status: 'unhealthy', error: err?.message || 'unknown' });
+      }
+    });
+
     app.get('/.well-known/oauth-protected-resource', (_req, res) => {
       res.status(200).json(protectedResourceMetadata);
     });
